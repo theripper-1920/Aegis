@@ -34,13 +34,21 @@ export function compareDependencies(
   metadata: PackageMetadata,
   imports: ImportScanResult
 ): ComparatorResult {
-  // TODO: Person 1 implement
-  // Steps:
-  //   1. Get all declared deps from metadata.dependencies
-  //   2. Get all used deps from imports.usedDependencies
-  //   3. phantom = declared - used
-  //   4. missing = used - declared
-  //   5. usedDependencies = declared ∩ used
+  // 1. Get all declared deps from metadata.dependencies
+  const declaredDeps = Object.keys(metadata.dependencies || {});
+  // 2. Get all used deps from imports.usedDependencies
+  const usedDeps = imports.usedDependencies || [];
+  
+  // Convert arrays to Sets for O(1) lookup efficiency
+  const declaredSet = new Set(declaredDeps);
+  const usedSet = new Set(usedDeps);
 
-  throw new Error('compareDependencies() not yet implemented');
+  // 3. phantom = declared - used
+  const phantom = declaredDeps.filter(dep => !usedSet.has(dep));
+  // 4. missing = used - declared
+  const missing = usedDeps.filter(dep => !declaredSet.has(dep));
+  // 5. usedDependencies = declared ∩ used
+  const usedDependencies = declaredDeps.filter(dep => usedSet.has(dep));
+
+  return { usedDependencies, phantom, missing };
 }
