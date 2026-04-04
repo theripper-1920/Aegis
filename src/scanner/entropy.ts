@@ -10,9 +10,9 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { walkSourceFiles, isMinifiedFile } from '../utils/file_walker';
+import { walkSourceFiles, isMinifiedFile, stripInlineComments } from '../utils/file_walker';
 
-const ENTROPY_THRESHOLD = 4.5;
+const ENTROPY_THRESHOLD = 5.0;
 const MIN_STRING_LENGTH = 20;
 const OUTPUT_TRUNCATE_LENGTH = 60;
 
@@ -90,8 +90,10 @@ export async function scanEntropy(
     try {
       const lines = file.content.split('\n');
       for (let i = 0; i < lines.length; i++) {
-        const literals = extractStringLiterals(lines[i]);
+        const literals = extractStringLiterals(stripInlineComments(lines[i]));
         for (const literal of literals) {
+          // Skip URL strings and template expression fragments — not obfuscation
+          if (literal.includes('://') || literal.includes('${')) continue;
           const h = calculateEntropy(literal);
           if (h > ENTROPY_THRESHOLD) {
             const display =

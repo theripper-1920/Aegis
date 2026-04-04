@@ -10,24 +10,28 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { walkSourceFiles } from '../utils/file_walker';
+import { walkSourceFiles, stripInlineComments } from '../utils/file_walker';
 
 // Non-global regexes (no /g flag) — safe to reuse across lines without resetting lastIndex.
+// Only patterns that point to genuinely sensitive resources.
+// Removed: process.env (replaced by whitelist below), __dirname, __filename,
+//          readdirSync, existsSync, os.tmpdir() — all standard Node.js primitives.
+// Kept: readFileSync (real attacks: readFileSync('/etc/passwd')).
 const FS_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\/etc\/passwd/,       label: '/etc/passwd' },
   { pattern: /\/etc\/shadow/,       label: '/etc/shadow' },
   { pattern: /~\/\.ssh/,            label: '~/.ssh' },
   { pattern: /\.ssh\/id_rsa/,       label: '.ssh/id_rsa' },
-  { pattern: /process\.env/,        label: 'process.env' },
   { pattern: /os\.homedir\s*\(\)/,  label: 'os.homedir()' },
-  { pattern: /os\.tmpdir\s*\(\)/,   label: 'os.tmpdir()' },
   { pattern: /readFileSync\s*\(/,   label: 'readFileSync' },
-  { pattern: /readdirSync\s*\(/,    label: 'readdirSync' },
-  { pattern: /existsSync\s*\(/,     label: 'existsSync' },
   { pattern: /fs\.watch\s*\(/,      label: 'fs.watch' },
-  { pattern: /\b__dirname\b/,       label: '__dirname' },
-  { pattern: /\b__filename\b/,      label: '__filename' },
 ];
+
+// Env vars that are universally benign — don't flag these.
+const SAFE_ENV_VARS = new Set([
+  'NODE_ENV', 'PORT', 'DEBUG', 'HOME', 'PATH',
+  'CI', 'TERM', 'LANG', 'TZ', 'NODE_DEBUG',
+]);
 
 /**
  * Returns deduplicated labels for all fs patterns found in a single line.
@@ -67,12 +71,29 @@ export async function scanFsAccess(
     try {
       const lines = file.content.split('\n');
       for (let i = 0; i < lines.length; i++) {
-        const matchedLabels = getMatchedLabels(lines[i]);
+        const line = lines[i];
+        const trimmed = line.trim();
+        const relPath = file.relativePath;
+        const lineNum = i + 1;
+        const code = stripInlineComments(line); // strip trailing comments before matching
+
+        const matchedLabels = getMatchedLabels(code);
+
+        // Smart process.env check: flag bare access or unknown env var names.
+        // Bare process.env (no key) = iterating all env vars = exfiltration pattern.
+        // process.env.UNKNOWN_KEY = potential secret harvesting.
+        const envMatch = code.match(/process\.env(?:\.([A-Z_a-z][A-Z0-9_a-z]*))?/);
+        if (envMatch) {
+          const key = envMatch[1]; // undefined when bare process.env
+          if (!key || !SAFE_ENV_VARS.has(key.toUpperCase())) {
+            matchedLabels.push(`process.env${key ? '.' + key : ' (bare)'}`);
+          }
+        }
+
         if (matchedLabels.length === 0) continue;
 
-        const trimmed = lines[i].trim();
         findings.push(
-          `${file.relativePath}:${i + 1} — ${trimmed} — contains ${matchedLabels.join(', ')}`
+          `${relPath}:${lineNum} — ${trimmed} — contains ${matchedLabels.join(', ')}`
         );
       }
     } catch {

@@ -10,7 +10,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { walkSourceFiles } from '../utils/file_walker';
+import { walkSourceFiles, isCommentLine, stripInlineComments } from '../utils/file_walker';
 
 // Non-global regexes — safe to reuse per line without resetting lastIndex.
 const EXEC_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
@@ -26,8 +26,9 @@ const EXEC_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bRuntime\.getRuntime\b/,    label: 'Runtime.getRuntime' },
 ];
 
-// Matches .exec( preceded by a word char or closing paren — this is regex.exec(), NOT child_process.exec()
-const REGEX_EXEC_RE = /[\w.)]\s*\.exec\s*\(/;
+// Matches .exec( preceded by a word char, closing paren, or regex literal closing slash
+// e.g. pattern.exec(, result).exec(, /regex/.exec( — all safe, not child_process
+const REGEX_EXEC_RE = /[\w.)/]\s*\.exec\s*\(/;
 
 /**
  * Returns deduplicated labels for all exec patterns found in a single line.
@@ -82,7 +83,8 @@ export async function scanExec(
     try {
       const lines = file.content.split('\n');
       for (let i = 0; i < lines.length; i++) {
-        const matchedLabels = getMatchedLabels(lines[i]);
+        if (isCommentLine(lines[i])) continue;
+        const matchedLabels = getMatchedLabels(stripInlineComments(lines[i]));
         if (matchedLabels.length === 0) continue;
 
         const trimmed = lines[i].trim();

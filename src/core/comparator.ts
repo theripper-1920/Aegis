@@ -50,8 +50,12 @@ export function compareDependencies(
   const declaredSet = new Set(declaredDeps);
   const usedSet = new Set(usedDeps);
 
-  // 4. phantom = declared - used - optional/peer
-  const phantom = declaredDeps.filter(dep => !usedSet.has(dep) && !optionalDeps.has(dep));
+  // 4. phantom = declared - used - optional/peer - @types/* (TS type packages, never require()'d)
+  const phantom = declaredDeps.filter(dep =>
+    !usedSet.has(dep) &&
+    !optionalDeps.has(dep) &&
+    !dep.startsWith('@types/')
+  );
   // 5. missing = used - declared
   const missing = usedDeps.filter(dep => !declaredSet.has(dep));
   // 6. usedDependencies = declared ∩ used

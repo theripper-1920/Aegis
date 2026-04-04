@@ -48,6 +48,7 @@ import { runGeminiAnalysis } from './scanner/gemini';
 
 // Utils
 import { logScan, logScanReport, getScanHistory, initDatabase, closeDatabase } from './utils/logger';
+import { walkSourceFiles } from './utils/file_walker';
 
 // Types
 import { PolicyResult, Decision } from './types';
@@ -106,7 +107,37 @@ async function runPipeline(packageName: string, version: string): Promise<{
   // ── 3. Extract imports & compare dependencies ───────────
   const compareSpinner = ora('Analyzing dependencies...').start();
   const imports = await extractImports(packageData.extractedPath);
-  const comparator = compareDependencies(packageData.metadata, imports);
+  let comparator = compareDependencies(packageData.metadata, imports);
+
+  // String-literal fallback: regex import extraction misses dynamic require('pkg') and
+  // packages that only ship compiled code in dist/. Search the entire package tree
+  // (including dist/) for quoted string literals matching each phantom dep name.
+  // Uses its own walk so it isn't constrained by walkSourceFiles's SKIP_DIRS.
+  if (comparator.phantom.length > 0) {
+    const allContents: string[] = [];
+    const SOURCE_EXTS = new Set(['.js', '.ts', '.mjs', '.cjs', '.jsx', '.tsx']);
+    const HARD_SKIP = new Set(['node_modules', '.git']); // only skip these
+    function walkAll(dir: string): void {
+      let entries;
+      try { entries = require('fs').readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const entry of entries) {
+        const full = require('path').join(dir, entry.name);
+        if (entry.isDirectory() && !HARD_SKIP.has(entry.name)) { walkAll(full); }
+        else if (entry.isFile() && !entry.name.endsWith('.d.ts') &&
+                 SOURCE_EXTS.has(require('path').extname(entry.name).toLowerCase())) {
+          try { allContents.push(require('fs').readFileSync(full, 'utf-8')); } catch { /* skip */ }
+        }
+      }
+    }
+    walkAll(packageData.extractedPath);
+    const confirmedPhantoms = comparator.phantom.filter(dep => {
+      const escaped = dep.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const literal = new RegExp(`['"\`]${escaped}['"\`]`);
+      return !allContents.some(content => literal.test(content));
+    });
+    comparator = { ...comparator, phantom: confirmedPhantoms };
+  }
+
   compareSpinner.succeed('Dependency analysis complete');
 
   if (comparator.phantom.length > 0) {

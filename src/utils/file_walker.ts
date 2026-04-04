@@ -25,6 +25,27 @@ export function isCommentLine(line: string): boolean {
 }
 
 /**
+ * Strips inline trailing comments from a line, returning only the code portion.
+ *
+ * Handles two forms:
+ *   1. Trailing `// comment` — stripped when preceded by whitespace.
+ *      Using `\s+` avoids stripping `://` which appears in URL strings like
+ *      `fetch('https://api.com')` — no whitespace precedes the `//` there.
+ *   2. Inline `/* comment *\/` blocks — removed wherever they appear.
+ *
+ * Note: does not handle `//` inside quoted strings (e.g. `'hello // world'`),
+ * but that edge case is rare in practice and acceptable for static heuristics.
+ */
+export function stripInlineComments(line: string): string {
+  // Remove /* ... */ inline block comments first
+  let stripped = line.replace(/\/\*.*?\*\//g, '');
+  // Remove trailing // comments preceded by whitespace
+  // \s+ ensures we don't strip :// in URL string literals
+  stripped = stripped.replace(/\s+\/\/.*$/, '');
+  return stripped;
+}
+
+/**
  * Checks if a file is minified (.min.js, .min.cjs, etc.).
  * Minified code naturally has high entropy — not obfuscation.
  */
@@ -40,6 +61,7 @@ export const SOURCE_EXTENSIONS = new Set([
 /** Directories to skip during walking */
 export const SKIP_DIRS = new Set([
   'node_modules', '.git', 'dist', 'build', 'coverage', '__tests__', 'test',
+  'examples', 'docs', 'fixtures', 'spec', '__mocks__', 'demo',
 ]);
 
 export interface SourceFile {
@@ -70,6 +92,7 @@ export function walkSourceFiles(rootDir: string): SourceFile[] {
           walk(fullPath);
         }
       } else if (entry.isFile()) {
+        if (entry.name.endsWith('.d.ts')) continue; // type-only, never executable
         const ext = path.extname(entry.name).toLowerCase();
         if (SOURCE_EXTENSIONS.has(ext)) {
           results.push({

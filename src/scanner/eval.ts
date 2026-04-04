@@ -11,7 +11,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { walkSourceFiles } from '../utils/file_walker';
+import { walkSourceFiles, isCommentLine, stripInlineComments } from '../utils/file_walker';
 
 // Non-global regexes — safe to reuse per line without resetting lastIndex.
 // setTimeout/setInterval are only suspicious when passed a string (not a function),
@@ -65,7 +65,8 @@ export async function scanEval(
     try {
       const lines = file.content.split('\n');
       for (let i = 0; i < lines.length; i++) {
-        const matchedLabels = getMatchedLabels(lines[i]);
+        if (isCommentLine(lines[i])) continue;
+        const matchedLabels = getMatchedLabels(stripInlineComments(lines[i]));
         if (matchedLabels.length === 0) continue;
 
         const trimmed = lines[i].trim();
