@@ -24,6 +24,16 @@ export const THRESHOLDS = {
   FLAG: 40,
 } as const;
 
+/** Global whitelist for legitimate packages containing heavy install scripts */
+export const KNOWN_SAFE_PACKAGES = new Set([
+  'esbuild', 
+  'sharp', 
+  'puppeteer', 
+  'node-sass', 
+  'sqlite3', 
+  'bcrypt'
+]);
+
 /**
  * Simple threshold check.
  */
@@ -133,10 +143,22 @@ export function applyFullPolicy(
   riskScore: FullRiskScore,
   input: FullScanInput
 ): PolicyResult {
+  const decision = decide(riskScore.total);
+  const reasons = generateReasons(input, riskScore);
+
+  if (KNOWN_SAFE_PACKAGES.has(input.packageName) && decision !== 'ALLOW') {
+    reasons.push('✅ Verdict overridden: Package is on the global whitelist. Known safe despite aggressive install scripts.');
+    return {
+      decision: 'ALLOW',
+      score: riskScore.total,
+      reasons,
+    };
+  }
+
   return {
-    decision: decide(riskScore.total),
+    decision,
     score: riskScore.total,
-    reasons: generateReasons(input, riskScore),
+    reasons,
   };
 }
 
