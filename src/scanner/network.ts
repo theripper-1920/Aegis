@@ -10,7 +10,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { walkSourceFiles } from '../utils/file_walker';
+import { walkSourceFiles, isCommentLine } from '../utils/file_walker';
 
 // Each pattern: the regex (non-global, applied per line) and its label.
 // Ordered so more specific matches (full URL) come before their substrings.
@@ -51,6 +51,7 @@ export async function scanNetwork(
       const lines = file.content.split('\n');
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
+        if (isCommentLine(line)) continue; // Skip comments — URLs in docs are not suspicious
         const matchedLabels = getMatchedLabels(line);
         if (matchedLabels.length === 0) continue;
 

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import * as dotenv from 'dotenv';
+dotenv.config();
 /**
  * ═══════════════════════════════════════════════════════════
  *  🛡️  AEGIS-AST — Main CLI Entry Point
@@ -20,11 +22,18 @@ import ora from 'ora';
 import { execSync } from 'child_process';
 import * as readline from 'readline';
 
-// Core modules
+// Core modules (P1)
 import { fetchPackage, extractImports, compareDependencies, cleanup } from './core';
-import { calculateRisk, applyPolicy } from './core';
 
-// Scanners
+// P3 risk engine & policy (uses FullScanInput, not old SecurityScanResult)
+import {
+  calculateFullRisk,
+  FullScanInput,
+  ScannerOutput,
+} from './core/risk_engine';
+import { applyFullPolicy } from './core/policy';
+
+// Scanners (P2 — return string[] format)
 import {
   scanScripts,
   scanNetwork,
@@ -34,11 +43,14 @@ import {
   scanEval,
 } from './scanner/index';
 
+// Gemini (conditional)
+import { runGeminiAnalysis } from './scanner/gemini';
+
 // Utils
-import { logScanReport, getScanHistory, initDatabase, closeDatabase } from './utils';
+import { logScan, logScanReport, getScanHistory, initDatabase, closeDatabase } from './utils/logger';
 
 // Types
-import { RiskInput, SecurityScanResult, ScanReport } from './types';
+import { PolicyResult, Decision } from './types';
 
 const program = new Command();
 
@@ -69,15 +81,16 @@ function askUser(question: string): Promise<boolean> {
 }
 
 /**
- * Runs the full scan pipeline and returns the scan report.
+ * Runs the full scan pipeline and returns the results.
  * Shared by both `install` and `scan` commands.
  */
 async function runPipeline(packageName: string, version: string): Promise<{
-  report: ScanReport;
+  input: FullScanInput;
+  policy: PolicyResult;
   extractedPath: string;
 }> {
   // ── 1. Show banner ──────────────────────────────────────
-  console.log(chalk.bold.cyan('\n🛡️  Aegis-A ST Security Scanner\n'));
+  console.log(chalk.bold.cyan('\n🛡️  Aegis-AST Security Scanner\n'));
 
   // ── 2. Fetch package ────────────────────────────────────
   const spinner = ora(`Fetching package ${packageName}@${version}...`).start();
@@ -90,11 +103,24 @@ async function runPipeline(packageName: string, version: string): Promise<{
     process.exit(1);
   }
 
-  // ── 3. Run all scanners in parallel ─────────────────────
+  // ── 3. Extract imports & compare dependencies ───────────
+  const compareSpinner = ora('Analyzing dependencies...').start();
+  const imports = await extractImports(packageData.extractedPath);
+  const comparator = compareDependencies(packageData.metadata, imports);
+  compareSpinner.succeed('Dependency analysis complete');
+
+  if (comparator.phantom.length > 0) {
+    console.log(chalk.red.bold(`  🚨 ${comparator.phantom.length} PHANTOM DEPENDENCY(S) DETECTED`));
+    for (const dep of comparator.phantom) {
+      console.log(chalk.red(`     ⚠  ${dep} — declared but NEVER used in source code`));
+    }
+    console.log();
+  }
+
+  // ── 4. Run all scanners in parallel ─────────────────────
   const scanSpinner = ora('Running security scanners...').start();
-  const [imports, scripts, network, entropy, fs, exec, evalScan] = await Promise.all([
-    extractImports(packageData.extractedPath),
-    scanScripts(packageData.metadata.scripts || {}),
+  const [scripts, network, entropy, fs, exec, evalScan] = await Promise.all([
+    scanScripts(packageData.extractedPath),
     scanNetwork(packageData.extractedPath),
     scanEntropy(packageData.extractedPath),
     scanFsAccess(packageData.extractedPath),
@@ -103,13 +129,8 @@ async function runPipeline(packageName: string, version: string): Promise<{
   ]);
   scanSpinner.succeed('Security scans complete');
 
-  // ── 4. Compare dependencies ─────────────────────────────
-  const compareSpinner = ora('Comparing declared vs. used dependencies...').start();
-  const comparator = compareDependencies(packageData.metadata, imports);
-  compareSpinner.succeed('Dependency comparison complete');
-
-  // ── 5. Assemble security results & Build risk input ─────
-  const security: SecurityScanResult = {
+  // Build P2's ScannerOutput (string[] format)
+  const scannerOutput: ScannerOutput = {
     scripts: scripts.scripts,
     network: network.network,
     entropy: entropy.entropy,
@@ -118,20 +139,38 @@ async function runPipeline(packageName: string, version: string): Promise<{
     eval: evalScan.eval,
   };
 
-  const riskInput: RiskInput = {
+  // Count flagged scanners for Gemini threshold
+  let flagCount = 0;
+  for (const findings of Object.values(scannerOutput)) {
+    if (findings.length > 0) flagCount++;
+  }
+
+  // ── 5. Gemini AI analysis (conditional) ─────────────────
+  const geminiResult = await runGeminiAnalysis(
+    flagCount + (comparator.phantom.length > 0 ? 1 : 0), // phantoms count as a flag
+    packageName,
+    scannerOutput.scripts.length > 0 ? scannerOutput.scripts.join('\n') : undefined,
+    { similarTo: packageName, downloads: 0, ageDays: 0 }
+  );
+
+  // ── 6. Build FullScanInput for P3's risk engine ─────────
+  const input: FullScanInput = {
     packageName,
     packageVersion: packageData.metadata.version,
-    comparator,
-    security,
+    ecosystem: 'npm',
+    phantomDeps: comparator.phantom,
+    scannerOutput,
+    gemini: geminiResult,
+    // TODO: recursive phantom scanning would add phantomScanResults here
   };
 
-  // ── 6. Calculate risk score ─────────────────────────────
-  const riskScore = calculateRisk(riskInput);
+  // ── 7. Calculate risk score ─────────────────────────────
+  const riskScore = calculateFullRisk(input);
 
-  // ── 7. Apply policy ─────────────────────────────────────
-  const policy = applyPolicy(riskScore, riskInput);
+  // ── 8. Apply policy ─────────────────────────────────────
+  const policy = applyFullPolicy(riskScore, input);
 
-  // ── 8. Display results with rich formatting ─────────────
+  // ── 9. Display results with rich formatting ─────────────
   console.log(chalk.bold('\n═══════════════════════════════════════════'));
   console.log(chalk.bold('  📊  SCAN RESULTS'));
   console.log(chalk.bold('═══════════════════════════════════════════\n'));
@@ -143,7 +182,7 @@ async function runPipeline(packageName: string, version: string): Promise<{
 
   // Risk score with color coding
   const scoreColor = riskScore.total > 70 ? chalk.red : riskScore.total > 40 ? chalk.yellow : chalk.green;
-  console.log(`  ${chalk.dim('Risk Score:')} ${scoreColor.bold(String(riskScore.total) + ' / 100')}`);
+  console.log(`  ${chalk.dim('Risk Score:')} ${scoreColor.bold(String(riskScore.total))}`);
   console.log();
 
   // Score breakdown
@@ -152,38 +191,37 @@ async function runPipeline(packageName: string, version: string): Promise<{
   for (const [category, score] of breakdownEntries) {
     if (score > 0) {
       const icon = score >= 40 ? '🔴' : score >= 20 ? '🟡' : '🟢';
-      console.log(`    ${icon} ${chalk.dim(category.padEnd(12))} +${score}`);
+      console.log(`    ${icon} ${chalk.dim(category.padEnd(16))} +${score}`);
     }
   }
   console.log();
 
-  // Phantom dependencies (the core innovation)
-  if (comparator.phantom.length > 0) {
-    console.log(chalk.red.bold('  🚨 PHANTOM DEPENDENCIES DETECTED:'));
-    for (const dep of comparator.phantom) {
-      console.log(chalk.red(`     ⚠  ${dep} — declared but NEVER used`));
+  // Security findings summary
+  const summaries: Array<[string, string[], string]> = [
+    ['Suspicious script(s)', scannerOutput.scripts, 'yellow'],
+    ['Network reference(s)', scannerOutput.network, 'yellow'],
+    ['High-entropy string(s)', scannerOutput.entropy, 'yellow'],
+    ['Filesystem access pattern(s)', scannerOutput.fs, 'yellow'],
+    ['Exec/spawn call(s)', scannerOutput.exec, 'yellow'],
+    ['Eval/Function usage(s)', scannerOutput.eval, 'red'],
+  ];
+
+  for (const [label, findings, color] of summaries) {
+    if (findings.length > 0) {
+      const colorFn = color === 'red' ? chalk.red : chalk.yellow;
+      const icon = color === 'red' ? '🚨' : '⚠';
+      console.log(colorFn(`  ${icon}  ${findings.length} ${label}`));
     }
-    console.log();
   }
 
-  // Security findings summary
-  if (security.scripts.length > 0) {
-    console.log(chalk.yellow(`  ⚠  ${security.scripts.length} suspicious script(s) found`));
-  }
-  if (security.network.length > 0) {
-    console.log(chalk.yellow(`  ⚠  ${security.network.length} network reference(s) found`));
-  }
-  if (security.entropy.length > 0) {
-    console.log(chalk.yellow(`  ⚠  ${security.entropy.length} high-entropy string(s) found`));
-  }
-  if (security.exec.length > 0) {
-    console.log(chalk.yellow(`  ⚠  ${security.exec.length} exec/spawn call(s) found`));
-  }
-  if (security.eval.length > 0) {
-    console.log(chalk.red(`  🚨 ${security.eval.length} eval/Function usage(s) found`));
-  }
-  if (security.fs.length > 0) {
-    console.log(chalk.yellow(`  ⚠  ${security.fs.length} filesystem access pattern(s) found`));
+  // Gemini results
+  if (geminiResult) {
+    if (geminiResult.typosquat && geminiResult.typosquat.verdict !== 'legitimate') {
+      console.log(chalk.red(`  🤖 Gemini: ${geminiResult.typosquat.verdict} — ${geminiResult.typosquat.reasoning}`));
+    }
+    if (geminiResult.script && geminiResult.script.verdict !== 'safe') {
+      console.log(chalk.red(`  🤖 Gemini: ${geminiResult.script.verdict} script — ${geminiResult.script.reasoning}`));
+    }
   }
   console.log();
 
@@ -197,28 +235,14 @@ async function runPipeline(packageName: string, version: string): Promise<{
   if (policy.reasons.length > 0) {
     console.log(chalk.dim('  ── Reasons ─────────────────────────────'));
     for (const reason of policy.reasons) {
-      console.log(`    • ${reason}`);
+      console.log(`    ${reason}`);
     }
     console.log();
   }
 
   console.log(chalk.bold('═══════════════════════════════════════════\n'));
 
-  // Build the scan report
-  const report: ScanReport = {
-    package: packageName,
-    version: packageData.metadata.version,
-    timestamp: new Date().toISOString(),
-    score: riskScore.total,
-    decision: policy.decision,
-    reasons: policy.reasons,
-    details: {
-      comparator,
-      security,
-    },
-  };
-
-  return { report, extractedPath: packageData.extractedPath };
+  return { input, policy, extractedPath: packageData.extractedPath };
 }
 
 // ─── aegis install <package> ─────────────────────────────
@@ -229,15 +253,16 @@ program
   .option('-v, --pkg-version <version>', 'Package version', 'latest')
   .option('--skip-db', 'Skip MongoDB logging', false)
   .action(async (packageName: string, options) => {
-    const { report, extractedPath } = await runPipeline(packageName, options.pkgVersion);
+    const { input, policy, extractedPath } = await runPipeline(packageName, options.pkgVersion);
+    const riskScore = calculateFullRisk(input);
 
     let shouldInstall = false;
 
-    // ── 9. Decide whether to install ────────────────────────
-    if (report.decision === 'ALLOW') {
+    // ── Decide whether to install ────────────────────────
+    if (policy.decision === 'ALLOW') {
       console.log(chalk.green('  Package passed all security checks.\n'));
       shouldInstall = true;
-    } else if (report.decision === 'FLAG') {
+    } else if (policy.decision === 'FLAG') {
       console.log(chalk.yellow('  ⚠  Package has potential risks. Review the findings above.\n'));
       shouldInstall = await askUser(
         chalk.yellow('  Proceed with installation anyway? (y/N): ')
@@ -251,7 +276,7 @@ program
       shouldInstall = false;
     }
 
-    // ── 10. Install if allowed ──────────────────────────────
+    // ── Install if allowed ──────────────────────────────
     if (shouldInstall) {
       const installSpinner = ora(`Installing ${packageName}...`).start();
       try {
@@ -265,11 +290,11 @@ program
       }
     }
 
-    // ── 11. Log to MongoDB ──────────────────────────────────
+    // ── Log to MongoDB ──────────────────────────────────
     if (!options.skipDb) {
       try {
         await initDatabase();
-        await logScanReport(report);
+        await logScan(input, riskScore, policy.decision, policy.reasons);
         await closeDatabase();
         console.log(chalk.dim('  📝 Scan report logged to database.\n'));
       } catch {
@@ -277,7 +302,7 @@ program
       }
     }
 
-    // ── 12. Clean up temp files ──────────────────────────────
+    // ── Clean up temp files ──────────────────────────────
     try {
       await cleanup(extractedPath);
     } catch {
@@ -295,13 +320,14 @@ program
   .action(async (packageName: string, options) => {
     console.log(chalk.dim('  (scan-only mode — package will NOT be installed)\n'));
 
-    const { report, extractedPath } = await runPipeline(packageName, options.pkgVersion);
+    const { input, policy, extractedPath } = await runPipeline(packageName, options.pkgVersion);
+    const riskScore = calculateFullRisk(input);
 
     // Log to MongoDB
     if (!options.skipDb) {
       try {
         await initDatabase();
-        await logScanReport(report);
+        await logScan(input, riskScore, policy.decision, policy.reasons);
         await closeDatabase();
         console.log(chalk.dim('  📝 Scan report logged to database.\n'));
       } catch {
@@ -353,7 +379,7 @@ program
         console.log(chalk.dim('  ──────────────────────────────────────'));
         console.log(`  ${chalk.dim('Date:')}     ${timestamp}`);
         console.log(`  ${chalk.dim('Version:')}  ${entry.version}`);
-        console.log(`  ${chalk.dim('Score:')}    ${scoreColor(String(entry.score) + '/100')}`);
+        console.log(`  ${chalk.dim('Score:')}    ${scoreColor(String(entry.score))}`);
         console.log(`  ${chalk.dim('Decision:')} ${decisionColor.bold(entry.decision)}`);
         if (entry.reasons.length > 0) {
           console.log(`  ${chalk.dim('Reasons:')}`);

@@ -10,7 +10,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { walkSourceFiles } from '../utils/file_walker';
+import { walkSourceFiles, isMinifiedFile } from '../utils/file_walker';
 
 const ENTROPY_THRESHOLD = 4.5;
 const MIN_STRING_LENGTH = 20;
@@ -85,6 +85,8 @@ export async function scanEntropy(
   const findings: string[] = [];
 
   for (const file of files) {
+    // Skip minified files — they naturally have high entropy from compression, not obfuscation
+    if (isMinifiedFile(file.relativePath)) continue;
     try {
       const lines = file.content.split('\n');
       for (let i = 0; i < lines.length; i++) {

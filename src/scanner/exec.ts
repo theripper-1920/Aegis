@@ -18,7 +18,6 @@ const EXEC_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bexecSync\s*\(/,             label: 'execSync' },
   { pattern: /\bexecFileSync\s*\(/,         label: 'execFileSync' },
   { pattern: /\bexecFile\s*\(/,             label: 'execFile' },
-  { pattern: /\bexec\s*\(/,                 label: 'exec' },
   { pattern: /\bspawnSync\s*\(/,            label: 'spawnSync' },
   { pattern: /\bspawn\s*\(/,               label: 'spawn' },
   { pattern: /\bshelljs\b/,                label: 'shelljs' },
@@ -27,10 +26,13 @@ const EXEC_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bRuntime\.getRuntime\b/,    label: 'Runtime.getRuntime' },
 ];
 
+// Matches .exec( preceded by a word char or closing paren — this is regex.exec(), NOT child_process.exec()
+const REGEX_EXEC_RE = /[\w.)]\s*\.exec\s*\(/;
+
 /**
  * Returns deduplicated labels for all exec patterns found in a single line.
- * More specific patterns (execSync, execFile) are listed before their prefix
- * (exec) so a line with `execSync(` emits "execSync" not "execSync, exec".
+ * Distinguishes child_process.exec() from RegExp.exec() to avoid false positives
+ * on packages like axios and lodash that use regex heavily.
  */
 function getMatchedLabels(line: string): string[] {
   const seen = new Set<string>();
@@ -39,6 +41,19 @@ function getMatchedLabels(line: string): string[] {
       seen.add(label);
     }
   }
+
+  // Only flag standalone exec( if it's NOT a regex method call
+  // e.g. "exec('cmd')" → flag, but "pattern.exec(str)" → skip
+  if (!seen.has('child_process') && !seen.has('shell.exec')) {
+    // Check for standalone exec( that isn't regex.exec()
+    if (/\bexec\s*\(/.test(line) && !REGEX_EXEC_RE.test(line)) {
+      seen.add('exec');
+    }
+  } else if (/\bexec\s*\(/.test(line)) {
+    // If child_process is on the same line, it's definitely shell exec
+    seen.add('exec');
+  }
+
   return Array.from(seen);
 }
 

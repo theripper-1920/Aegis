@@ -9,6 +9,29 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
+/**
+ * Checks if a line is a comment (single-line // or block comment /* or *).
+ * Used by scanners to skip false positives from URLs in documentation.
+ */
+export function isCommentLine(line: string): boolean {
+  const trimmed = line.trim();
+  return (
+    trimmed.startsWith('//') ||
+    trimmed.startsWith('/*') ||
+    trimmed.startsWith('*') ||
+    trimmed.startsWith('*/') ||
+    trimmed.startsWith('#')
+  );
+}
+
+/**
+ * Checks if a file is minified (.min.js, .min.cjs, etc.).
+ * Minified code naturally has high entropy — not obfuscation.
+ */
+export function isMinifiedFile(filePath: string): boolean {
+  return /\.min\.[cm]?js$/i.test(filePath);
+}
+
 /** File extensions to scan */
 export const SOURCE_EXTENSIONS = new Set([
   '.js', '.ts', '.mjs', '.cjs', '.jsx', '.tsx',

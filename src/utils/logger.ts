@@ -1,64 +1,227 @@
 /**
  * ═══════════════════════════════════════════════════════════
- *  AEGIS-AST — Logger (MongoDB + Console)
- *  Owner: Person 3 (Risk Engine + Backend)
- * 
- *  Responsibilities:
- *  - Log scan results to MongoDB Atlas
- *  - Console logging with chalk formatting
- *  - Connection management
+ *  AEGIS-AST — Logger (MongoDB Atlas)
+ *
+ *  Logs every scan with full signal breakdown.
+ *  Adapted to P2's string[] scanner output format.
+ *  Graceful fallback — CLI works even without DB.
  * ═══════════════════════════════════════════════════════════
  */
 
-import { LogEntry, ScanReport } from '../types';
+import { MongoClient, Db, Collection } from 'mongodb';
+import { Decision } from '../types';
+import {
+  FullScanInput,
+  FullRiskScore,
+  GeminiResults,
+} from '../core/risk_engine';
 
-/**
- * Initializes the MongoDB connection.
- * Uses MONGODB_URI from environment variables.
- */
+// ─── MongoDB Document Schema ────────────────────────────────
+
+export interface ScanLogDocument {
+  package: string;
+  version: string;
+  ecosystem: string;
+  timestamp: Date;
+  score: number;
+  decision: Decision;
+  reasons: string[];
+  phantom_deps: string[];
+  signals: {
+    phantom: string[];
+    scripts: string[];
+    network: string[];
+    entropy: string[];
+    fs: string[];
+    exec: string[];
+    eval: string[];
+    gemini: GeminiResults | null;
+  };
+  phantom_scan_results: Array<{
+    packageName: string;
+    score: number;
+    signals: Record<string, unknown>;
+  }> | null;
+}
+
+// ─── Module State ───────────────────────────────────────────
+
+let client: MongoClient | null = null;
+let db: Db | null = null;
+let scanLogsCollection: Collection<ScanLogDocument> | null = null;
+let isConnected = false;
+
+const DB_NAME = 'aegis';
+const COLLECTION_NAME = 'scan_logs';
+const CONNECTION_TIMEOUT_MS = 5000;
+
+// ─── Connection Management ──────────────────────────────────
+
 export async function initDatabase(): Promise<void> {
-  // TODO: Person 3 implement
-  // Steps:
-  //   1. Read MONGODB_URI from process.env
-  //   2. Connect to MongoDB using MongoClient
-  //   3. Verify connection
+  const uri = process.env.MONGODB_URI;
+  if (!uri) {
+    console.warn('⚠️  MONGODB_URI not set — database logging disabled.');
+    return;
+  }
 
-  throw new Error('initDatabase() not yet implemented');
+  try {
+    client = new MongoClient(uri, {
+      serverSelectionTimeoutMS: CONNECTION_TIMEOUT_MS,
+      connectTimeoutMS: CONNECTION_TIMEOUT_MS,
+    });
+    await client.connect();
+    await client.db('admin').command({ ping: 1 });
+
+    db = client.db(DB_NAME);
+    scanLogsCollection = db.collection<ScanLogDocument>(COLLECTION_NAME);
+
+    await scanLogsCollection.createIndex({ package: 1, timestamp: -1 });
+    await scanLogsCollection.createIndex({ decision: 1 });
+    await scanLogsCollection.createIndex({ score: -1 });
+    await scanLogsCollection.createIndex({ ecosystem: 1 });
+
+    isConnected = true;
+    console.log('✅ Connected to MongoDB Atlas');
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.warn(`⚠️  MongoDB connection failed: ${msg}\n   Database logging disabled.`);
+    client = null;
+    db = null;
+    scanLogsCollection = null;
+    isConnected = false;
+  }
 }
 
 /**
- * Logs a scan report to MongoDB.
- *
- * @param report - The complete scan report to log
+ * Logs a scan result to MongoDB.
+ * Uses P2's string[] format directly — no conversion needed.
  */
-export async function logScanReport(report: ScanReport): Promise<void> {
-  // TODO: Person 3 implement
-  // Steps:
-  //   1. Convert ScanReport to LogEntry
-  //   2. Insert into 'scan_logs' collection
-  //   3. Handle errors gracefully (don't crash CLI if DB is down)
+export async function logScan(
+  input: FullScanInput,
+  riskScore: FullRiskScore,
+  decision: Decision,
+  reasons: string[]
+): Promise<void> {
+  if (!isConnected || !scanLogsCollection) return;
 
-  throw new Error('logScanReport() not yet implemented');
+  try {
+    const out = input.scannerOutput || {
+      scripts: [], network: [], entropy: [], fs: [], exec: [], eval: [],
+    };
+
+    const doc: ScanLogDocument = {
+      package: input.packageName,
+      version: input.packageVersion,
+      ecosystem: input.ecosystem || 'npm',
+      timestamp: new Date(),
+      score: riskScore.total,
+      decision,
+      reasons,
+      phantom_deps: input.phantomDeps || [],
+      signals: {
+        phantom: input.phantomDeps || [],
+        scripts: out.scripts,
+        network: out.network,
+        entropy: out.entropy,
+        fs: out.fs,
+        exec: out.exec,
+        eval: out.eval,
+        gemini: input.gemini || null,
+      },
+      phantom_scan_results:
+        riskScore.phantomDetails.length > 0
+          ? riskScore.phantomDetails.map((p) => ({
+              packageName: p.packageName,
+              score: p.score,
+              signals: p.signals,
+            }))
+          : null,
+    };
+
+    await scanLogsCollection.insertOne(doc);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.warn(`⚠️  Failed to log scan: ${msg}`);
+  }
 }
 
 /**
- * Retrieves scan history for a package.
- *
- * @param packageName - Name of the package
- * @param limit - Max number of results
+ * Backward-compatible logScanReport for old pipeline.
  */
+export async function logScanReport(report: {
+  package: string;
+  version: string;
+  timestamp: string;
+  score: number;
+  decision: Decision;
+  reasons: string[];
+  details: Record<string, unknown>;
+}): Promise<void> {
+  if (!isConnected || !scanLogsCollection) return;
+
+  try {
+    const doc: Partial<ScanLogDocument> = {
+      package: report.package,
+      version: report.version,
+      ecosystem: 'npm',
+      timestamp: new Date(report.timestamp),
+      score: report.score,
+      decision: report.decision,
+      reasons: report.reasons,
+      phantom_deps: [],
+      signals: {
+        phantom: [],
+        scripts: [],
+        network: [],
+        entropy: [],
+        fs: [],
+        exec: [],
+        eval: [],
+        gemini: null,
+      },
+      phantom_scan_results: null,
+    };
+
+    await scanLogsCollection.insertOne(doc as ScanLogDocument);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.warn(`⚠️  Failed to log scan report: ${msg}`);
+  }
+}
+
 export async function getScanHistory(
   packageName: string,
   limit: number = 10
-): Promise<LogEntry[]> {
-  // TODO: Person 3 implement
-  throw new Error('getScanHistory() not yet implemented');
+): Promise<ScanLogDocument[]> {
+  if (!isConnected || !scanLogsCollection) {
+    console.warn('⚠️  Database not connected — cannot retrieve history.');
+    return [];
+  }
+
+  try {
+    return await scanLogsCollection
+      .find({ package: packageName })
+      .sort({ timestamp: -1 })
+      .limit(limit)
+      .toArray();
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.warn(`⚠️  Failed to get history: ${msg}`);
+    return [];
+  }
 }
 
-/**
- * Closes the MongoDB connection.
- */
 export async function closeDatabase(): Promise<void> {
-  // TODO: Person 3 implement
-  throw new Error('closeDatabase() not yet implemented');
+  if (client) {
+    try {
+      await client.close();
+    } catch {
+      // Ignore close errors
+    } finally {
+      client = null;
+      db = null;
+      scanLogsCollection = null;
+      isConnected = false;
+    }
+  }
 }
