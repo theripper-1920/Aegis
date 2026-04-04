@@ -26,11 +26,11 @@ export const THRESHOLDS = {
 
 /** Global whitelist for legitimate packages containing heavy install scripts */
 export const KNOWN_SAFE_PACKAGES = new Set([
-  'esbuild', 
-  'sharp', 
-  'puppeteer', 
-  'node-sass', 
-  'sqlite3', 
+  'esbuild',
+  'sharp',
+  'puppeteer',
+  'node-sass',
+  'sqlite3',
   'bcrypt'
 ]);
 

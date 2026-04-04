@@ -46,6 +46,31 @@ export function stripInlineComments(line: string): string {
 }
 
 /**
+ * Replaces the CONTENTS of string literals with a neutral placeholder.
+ *
+ * This prevents false positives where dangerous keywords appear inside
+ * quoted strings — e.g. eslint rule descriptions that mention "eval()"
+ * or "child_process" as documentation text rather than actual code.
+ *
+ * Before: description: "Disallow the use of eval()",
+ * After:  description: "~~STR~~",
+ *
+ * Handles single-quoted, double-quoted, and template literals.
+ * Preserves the quote delimiters so subsequent patterns can still
+ * distinguish string vs non-string positions.
+ *
+ * Limitation: does not handle multi-line template literals — those are
+ * split into individual lines before reaching here, so any backtick
+ * content on a single line is stripped correctly.
+ */
+export function stripStringLiterals(line: string): string {
+  return line
+    .replace(/"(?:[^"\\]|\\.)*"/g,  '"~~STR~~"')
+    .replace(/'(?:[^'\\]|\\.)*'/g,  "'~~STR~~'")
+    .replace(/`(?:[^`\\]|\\.)*`/g,  '`~~STR~~`');
+}
+
+/**
  * Checks if a file is minified (.min.js, .min.cjs, etc.).
  * Minified code naturally has high entropy — not obfuscation.
  */

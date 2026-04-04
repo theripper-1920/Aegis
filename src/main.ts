@@ -124,7 +124,7 @@ async function runPipeline(packageName: string, version: string): Promise<{
         const full = require('path').join(dir, entry.name);
         if (entry.isDirectory() && !HARD_SKIP.has(entry.name)) { walkAll(full); }
         else if (entry.isFile() && !entry.name.endsWith('.d.ts') &&
-                 SOURCE_EXTS.has(require('path').extname(entry.name).toLowerCase())) {
+          SOURCE_EXTS.has(require('path').extname(entry.name).toLowerCase())) {
           try { allContents.push(require('fs').readFileSync(full, 'utf-8')); } catch { /* skip */ }
         }
       }
@@ -181,6 +181,7 @@ async function runPipeline(packageName: string, version: string): Promise<{
     flagCount + (comparator.phantom.length > 0 ? 1 : 0), // phantoms count as a flag
     packageName,
     scannerOutput.scripts.length > 0 ? scannerOutput.scripts.join('\n') : undefined,
+    scannerOutput.network.length > 0 ? scannerOutput.network : undefined,
     { similarTo: packageName, downloads: 0, ageDays: 0 }
   );
 
@@ -252,6 +253,21 @@ async function runPipeline(packageName: string, version: string): Promise<{
     }
     if (geminiResult.script && geminiResult.script.verdict !== 'safe') {
       console.log(chalk.red(`  🤖 Gemini: ${geminiResult.script.verdict} script — ${geminiResult.script.reasoning}`));
+    }
+    // Domain trust verdicts
+    if (geminiResult.domainVerdicts && geminiResult.domainVerdicts.length > 0) {
+      console.log(chalk.dim('  ── Domain Trust Intelligence ────────────────'));
+      for (const v of geminiResult.domainVerdicts) {
+        const icon = v.decision === 'SAFE_NECESSARY' ? '✅' :
+                     v.decision === 'SAFE_UNNECESSARY' ? '🔵' :
+                     v.decision === 'SUSPICIOUS' ? '⚠️ ' : '🔴';
+        const color = v.decision === 'MALICIOUS' ? chalk.red :
+                      v.decision === 'SUSPICIOUS' ? chalk.yellow :
+                      v.decision === 'SAFE_UNNECESSARY' ? chalk.blue :
+                      chalk.green;
+        console.log(color(`    ${icon} ${v.domain} → ${v.decision} (${v.confidence}%)`));
+        console.log(chalk.dim(`       ${v.reasoning.substring(0, 120)}`));
+      }
     }
   }
   console.log();

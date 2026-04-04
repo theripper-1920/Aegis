@@ -11,7 +11,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { walkSourceFiles, isCommentLine, stripInlineComments } from '../utils/file_walker';
+import { walkSourceFiles, isCommentLine, stripInlineComments, stripStringLiterals } from '../utils/file_walker';
 
 // Non-global regexes — safe to reuse per line without resetting lastIndex.
 // setTimeout/setInterval are only suspicious when passed a string (not a function),
@@ -32,8 +32,11 @@ const EVAL_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
  */
 function getMatchedLabels(line: string): string[] {
   const seen = new Set<string>();
+  // Strip string literal contents first — prevents keywords mentioned inside
+  // quoted strings (e.g. rule descriptions like "Disallow eval()") from matching
+  const cleaned = stripStringLiterals(line);
   for (const { pattern, label } of EVAL_PATTERNS) {
-    if (pattern.test(line) && !seen.has(label)) {
+    if (pattern.test(cleaned) && !seen.has(label)) {
       seen.add(label);
     }
   }

@@ -13,7 +13,7 @@
  */
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { GeminiTyposquatResult, GeminiScriptResult, GeminiResults } from '../core/risk_engine';
+import { GeminiTyposquatResult, GeminiScriptResult, GeminiDomainVerdict, GeminiResults } from '../core/risk_engine';
 
 // ─── Init ───────────────────────────────────────────────────
 
@@ -163,19 +163,208 @@ Respond ONLY with valid JSON, no markdown, no explanation:
   }
 }
 
+// ─── Domain Trust Analysis ────────────────────────────────────────
+
+/** Input structure for a single domain to analyze */
+interface DomainInput {
+  domain: string;
+  full_url: string;
+  usage_context: string;
+  frequency: number;
+}
+
 /**
- * Runs both Gemini analyses if conditions are met.
+ * Extracts unique domains from network scanner findings.
+ * Deduplicates via hashmap and counts frequency.
+ */
+function extractDomainsFromFindings(networkFindings: string[]): DomainInput[] {
+  const domainMap = new Map<string, DomainInput>();
+
+  const urlRegex = /https?:\/\/([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)(\/[^\s'"`,;)}\]]*)?/gi;
+  const ipRegex = /\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/g;
+
+  for (const finding of networkFindings) {
+    let match;
+    while ((match = urlRegex.exec(finding)) !== null) {
+      const domain = match[1].toLowerCase();
+      const fullUrl = match[0];
+      if (domainMap.has(domain)) {
+        domainMap.get(domain)!.frequency++;
+      } else {
+        domainMap.set(domain, { domain, full_url: fullUrl, usage_context: finding, frequency: 1 });
+      }
+    }
+    urlRegex.lastIndex = 0;
+
+    while ((match = ipRegex.exec(finding)) !== null) {
+      const ip = match[1];
+      if (ip === '127.0.0.1' || ip === '0.0.0.0') continue;
+      if (domainMap.has(ip)) {
+        domainMap.get(ip)!.frequency++;
+      } else {
+        domainMap.set(ip, { domain: ip, full_url: ip, usage_context: finding, frequency: 1 });
+      }
+    }
+    ipRegex.lastIndex = 0;
+  }
+
+  return Array.from(domainMap.values());
+}
+
+/**
+ * Analyzes domains for trust verification.
+ * Acts as a security intelligence layer — classifies each domain as
+ * SAFE_NECESSARY, SAFE_UNNECESSARY, SUSPICIOUS, or MALICIOUS.
+ *
+ * @param networkFindings - Raw string[] from scanNetwork()
+ * @returns Array of domain verdicts (empty if no domains or no API key)
+ */
+export async function analyzeDomainTrust(
+  networkFindings: string[]
+): Promise<GeminiDomainVerdict[]> {
+  if (!networkFindings || networkFindings.length === 0) return [];
+
+  const domains = extractDomainsFromFindings(networkFindings);
+  if (domains.length === 0) return [];
+
+  const model = getModel();
+  if (!model) return [];
+
+  console.log(`[Gemini] Analyzing ${domains.length} unique domain(s) for trust verification...`);
+
+  const domainList = domains.map(d => JSON.stringify(d)).join(',\n  ');
+
+  const prompt = `You are a security intelligence module inside a package security scanner.
+
+Your role is to ANALYZE external network domains detected in package code and act as a TRUST VERIFICATION LAYER before final risk scoring.
+
+You will receive UNIQUE domains (deduplicated via hashmap) extracted from code.
+
+Determine whether each domain is:
+- Legitimate and necessary (SAFE_NECESSARY)
+- Legitimate but unnecessary (SAFE_UNNECESSARY)
+- Suspicious (SUSPICIOUS)
+- Malicious (MALICIOUS)
+
+DOMAINS TO ANALYZE:
+[
+  ${domainList}
+]
+
+ANALYSIS REQUIREMENTS — You MUST perform reasoning similar to a security researcher:
+
+1. Domain Trust
+   - Is this a well-known service? (Google, AWS, Cloudflare, npm registry, etc.)
+   - Or an obscure / newly appearing domain?
+
+2. Purpose Inference
+   - What is this endpoint likely doing?
+   - (API, analytics, telemetry, exfiltration, command-and-control)
+
+3. Risk Signals — Check for:
+   - Data collection endpoints (/collect, /track, /log)
+   - Suspicious naming (exfil, c2, webhook, bot, api/hidden)
+   - IP address usage instead of domain
+   - Non-HTTPS usage
+   - Hardcoded endpoints
+
+4. Context Awareness
+   - Does the usage_context suggest sensitive data transfer?
+   - Is this necessary for functionality or suspicious?
+
+IMPORTANT RULES:
+- DO NOT give generic answers like "might be unsafe"
+- You MUST justify decisions with concrete reasoning
+- If domain is well-known → explicitly say why it is safe
+- If suspicious → explain exact pattern
+- If unsure → classify as SUSPICIOUS (not safe)
+- Include at least ONE concrete signal from the domain or URL
+- Reference the usage_context in reasoning
+- Avoid vague statements
+
+Respond ONLY with a valid JSON array, no markdown, no explanation:
+[
+  {
+    "domain": "...",
+    "decision": "SAFE_NECESSARY" | "SAFE_UNNECESSARY" | "SUSPICIOUS" | "MALICIOUS",
+    "confidence": 0-100,
+    "risk_score": 0-100,
+    "reasoning": "clear, specific explanation referencing URL and context",
+    "signals": {
+      "known_service": true/false,
+      "data_collection_pattern": true/false,
+      "uses_https": true/false,
+      "suspicious_keywords": ["..."],
+      "ip_based": true/false
+    }
+  }
+]`;
+
+  try {
+    const result = await model.generateContent(prompt);
+    const text = result.response.text();
+    const parsed = safeParseJSON<GeminiDomainVerdict[]>(text);
+
+    if (parsed && Array.isArray(parsed)) {
+      const validDecisions = ['SAFE_NECESSARY', 'SAFE_UNNECESSARY', 'SUSPICIOUS', 'MALICIOUS'];
+      const verdicts = parsed
+        .filter(v => v.domain && validDecisions.includes(v.decision))
+        .map(v => ({
+          domain: v.domain,
+          decision: v.decision,
+          confidence: Math.max(0, Math.min(100, v.confidence ?? 50)),
+          risk_score: Math.max(0, Math.min(100, v.risk_score ?? 50)),
+          reasoning: v.reasoning || 'No reasoning provided',
+          signals: {
+            known_service: v.signals?.known_service ?? false,
+            data_collection_pattern: v.signals?.data_collection_pattern ?? false,
+            uses_https: v.signals?.uses_https ?? true,
+            suspicious_keywords: v.signals?.suspicious_keywords ?? [],
+            ip_based: v.signals?.ip_based ?? false,
+          },
+        }));
+
+      for (const v of verdicts) {
+        const icon = v.decision === 'SAFE_NECESSARY' ? '✅' :
+                     v.decision === 'SAFE_UNNECESSARY' ? '🔵' :
+                     v.decision === 'SUSPICIOUS' ? '⚠️' : '🔴';
+        console.log(`[Gemini] ${icon} ${v.domain} → ${v.decision} (${v.confidence}%)`);
+      }
+
+      return verdicts;
+    }
+
+    console.warn(`⚠️  Gemini domain analysis returned unparseable response`);
+    return [];
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.warn(`⚠️  Gemini domain trust analysis failed: ${msg}`);
+    return [];
+  }
+}
+
+// ─── Combined Runner ───────────────────────────────────────────
+
+/**
+ * Runs all Gemini analyses if conditions are met.
  * Only fires when 2+ scanners have flagged something.
  *
- * @param flagCount   - Number of scanners that flagged something
- * @param packageName - Package name (for typosquat check)
- * @param scriptContent - Content of flagged script (for analysis)
- * @param metadata    - Optional package metadata for typosquat context
+ * Three API calls:
+ *   1. classifyTyposquat() — is this a typosquat/slopsquat?
+ *   2. analyzeScript()     — is this script malicious?
+ *   3. analyzeDomainTrust() — are detected domains safe or malicious?
+ *
+ * @param flagCount       - Number of scanners that flagged something
+ * @param packageName     - Package name (for typosquat check)
+ * @param scriptContent   - Content of flagged script (for analysis)
+ * @param networkFindings - Network scanner findings (for domain trust)
+ * @param metadata        - Optional package metadata for typosquat context
  */
 export async function runGeminiAnalysis(
   flagCount: number,
   packageName: string,
   scriptContent?: string,
+  networkFindings?: string[],
   metadata?: { downloads?: number; ageDays?: number; similarTo?: string }
 ): Promise<GeminiResults | null> {
   // Only fire when 2+ scanners flagged something
@@ -208,6 +397,11 @@ export async function runGeminiAnalysis(
     console.log(`[Gemini] Analyzing flagged script content...`);
     results.script = await analyzeScript(scriptContent);
     console.log(`[Gemini] Verdict: ${results.script.verdict} (${results.script.risk_level})`);
+  }
+
+  // Call 3: Domain trust verification
+  if (networkFindings && networkFindings.length > 0) {
+    results.domainVerdicts = await analyzeDomainTrust(networkFindings);
   }
 
   return results;

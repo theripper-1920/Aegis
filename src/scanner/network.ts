@@ -10,19 +10,19 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { walkSourceFiles, isCommentLine, stripInlineComments } from '../utils/file_walker';
+import { walkSourceFiles, isCommentLine, stripInlineComments, stripStringLiterals } from '../utils/file_walker';
 
 // Each pattern: the regex (non-global, applied per line) and its label.
 // Ordered so more specific matches (full URL) come before their substrings.
 const NETWORK_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
-  { pattern: /https?:\/\//i,                              label: 'http' },
-  { pattern: /\b(?:\d{1,3}\.){3}\d{1,3}\b/,              label: 'hardcoded-ip' },
-  { pattern: /\bfetch\s*\(/,                              label: 'fetch' },
-  { pattern: /\baxios\b/,                                 label: 'axios' },
-  { pattern: /\bXMLHttpRequest\b/,                        label: 'XMLHttpRequest' },
-  { pattern: /socket\b/i,                                 label: 'socket' },
-  { pattern: /\bdns\.lookup\b/,                           label: 'dns.lookup' },
-  { pattern: /\bnet\.connect\b/,                          label: 'net.connect' },
+  { pattern: /https?:\/\//i, label: 'http' },
+  { pattern: /\b(?:\d{1,3}\.){3}\d{1,3}\b/, label: 'hardcoded-ip' },
+  { pattern: /\bfetch\s*\(/, label: 'fetch' },
+  { pattern: /\baxios\b/, label: 'axios' },
+  { pattern: /\bXMLHttpRequest\b/, label: 'XMLHttpRequest' },
+  { pattern: /socket\b/i, label: 'socket' },
+  { pattern: /\bdns\.lookup\b/, label: 'dns.lookup' },
+  { pattern: /\bnet\.connect\b/, label: 'net.connect' },
 ];
 
 /**
@@ -75,11 +75,30 @@ export async function scanNetwork(
  */
 function getMatchedLabels(line: string): string[] {
   const seen = new Set<string>();
+  // Strip string literal contents — a URL that only appears inside a quoted string
+  // (e.g. eslint doc links: url: "https://eslint.org/docs/...") is NOT a network call.
+  const cleanedLine = stripStringLiterals(line);
+
+  // Labels whose patterns are API *calls* — check on string-stripped line
+  const API_LABELS = new Set(['fetch', 'axios', 'XMLHttpRequest', 'socket', 'dns.lookup', 'net.connect']);
+
   for (const { pattern, label } of NETWORK_PATTERNS) {
-    if (pattern.test(line) && !seen.has(label)) {
-      seen.add(label);
+    if (API_LABELS.has(label)) {
+      // API call patterns: match on cleaned code only
+      if (pattern.test(cleanedLine) && !seen.has(label)) {
+        seen.add(label);
+      }
+    } else {
+      // URL / IP patterns: only flag if the URL/IP is NOT purely inside a string literal.
+      // i.e. it must still match after string contents are stripped.
+      // This catches: fetch('https://evil.com') → cleaned: fetch('~~STR~~') → URL gone, but fetch still flagged above.
+      // What we actually want: flag IPs and URLs that appear in code position, not just as string values.
+      if (pattern.test(cleanedLine) && !seen.has(label)) {
+        seen.add(label);
+      }
     }
   }
+
   return Array.from(seen);
 }
 

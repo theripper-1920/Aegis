@@ -45,10 +45,29 @@ export interface GeminiScriptResult {
   reasoning: string;
 }
 
+/** Gemini domain trust verdict */
+export type DomainDecision = 'SAFE_NECESSARY' | 'SAFE_UNNECESSARY' | 'SUSPICIOUS' | 'MALICIOUS';
+
+export interface GeminiDomainVerdict {
+  domain: string;
+  decision: DomainDecision;
+  confidence: number;
+  risk_score: number;
+  reasoning: string;
+  signals: {
+    known_service: boolean;
+    data_collection_pattern: boolean;
+    uses_https: boolean;
+    suspicious_keywords: string[];
+    ip_based: boolean;
+  };
+}
+
 /** Combined Gemini results — null if not invoked */
 export interface GeminiResults {
   typosquat?: GeminiTyposquatResult;
   script?: GeminiScriptResult;
+  domainVerdicts?: GeminiDomainVerdict[];
 }
 
 /**
@@ -160,6 +179,11 @@ function scoreScannerOutput(
 
 /**
  * Scores Gemini results. Adds weight only for non-legitimate / malicious verdicts.
+ * Domain verdicts modulate the network score:
+ *   SAFE_NECESSARY  → -15 (verified safe, reduce false positives)
+ *   SAFE_UNNECESSARY → +5  (analytics/tracking, slight concern)
+ *   SUSPICIOUS       → +15 (unknown domain, raise alert)
+ *   MALICIOUS        → +40 (confirmed threat)
  */
 function scoreGemini(gemini: GeminiResults | null | undefined): number {
   if (!gemini) return 0;
@@ -170,6 +194,24 @@ function scoreGemini(gemini: GeminiResults | null | undefined): number {
   }
   if (gemini.script && gemini.script.verdict === 'malicious') {
     score += WEIGHTS.gemini_malicious;
+  }
+
+  // Domain trust verdicts
+  if (gemini.domainVerdicts && gemini.domainVerdicts.length > 0) {
+    let domainAdj = 0;
+    for (const v of gemini.domainVerdicts) {
+      switch (v.decision) {
+        case 'SAFE_NECESSARY':  domainAdj -= 15; break;
+        case 'SAFE_UNNECESSARY': domainAdj += 5;  break;
+        case 'SUSPICIOUS':       domainAdj += 15; break;
+        case 'MALICIOUS':        domainAdj += 40; break;
+      }
+    }
+    // If ALL are safe & necessary, fully negate network weight
+    const allSafe = gemini.domainVerdicts.every(v => v.decision === 'SAFE_NECESSARY');
+    if (allSafe) domainAdj = -25;
+    // Clamp: don't let adjustment go below -25 or above +80
+    score += Math.max(-25, Math.min(80, domainAdj));
   }
 
   return score;

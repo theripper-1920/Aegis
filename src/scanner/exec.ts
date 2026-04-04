@@ -10,7 +10,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { walkSourceFiles, isCommentLine, stripInlineComments } from '../utils/file_walker';
+import { walkSourceFiles, isCommentLine, stripInlineComments, stripStringLiterals } from '../utils/file_walker';
 
 // Non-global regexes — safe to reuse per line without resetting lastIndex.
 const EXEC_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
@@ -37,8 +37,11 @@ const REGEX_EXEC_RE = /[\w.)/]\s*\.exec\s*\(/;
  */
 function getMatchedLabels(line: string): string[] {
   const seen = new Set<string>();
+  // Strip string literal contents first — prevents keywords mentioned inside
+  // quoted strings (e.g. "child_process" in eslint rule descriptions) from matching
+  const cleaned = stripStringLiterals(line);
   for (const { pattern, label } of EXEC_PATTERNS) {
-    if (pattern.test(line) && !seen.has(label)) {
+    if (pattern.test(cleaned) && !seen.has(label)) {
       seen.add(label);
     }
   }
@@ -46,11 +49,10 @@ function getMatchedLabels(line: string): string[] {
   // Only flag standalone exec( if it's NOT a regex method call
   // e.g. "exec('cmd')" → flag, but "pattern.exec(str)" → skip
   if (!seen.has('child_process') && !seen.has('shell.exec')) {
-    // Check for standalone exec( that isn't regex.exec()
-    if (/\bexec\s*\(/.test(line) && !REGEX_EXEC_RE.test(line)) {
+    if (/\bexec\s*\(/.test(cleaned) && !REGEX_EXEC_RE.test(cleaned)) {
       seen.add('exec');
     }
-  } else if (/\bexec\s*\(/.test(line)) {
+  } else if (/\bexec\s*\(/.test(cleaned)) {
     // If child_process is on the same line, it's definitely shell exec
     seen.add('exec');
   }
